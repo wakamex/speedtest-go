@@ -106,7 +106,8 @@ type TestDirection struct {
 	activeWorkers   int32                       // current upload worker limit
 	maxWorkers      int32                       // configured upload worker limit
 	RateSequence    []int64                     // rate history sequence
-	welford         *internal.Welford           // std/EWMA/mean
+	currentRate     atomic.Uint64               // float64 bits of the latest rate estimate, bytes per second
+	finalRateValue  float64                     // measured bytes per second at test termination
 	captureCallback func(realTimeRate ByteRate) // user callback
 	closeFunc       func()                      // close func
 	*funcGroup                                  // actually exec function
@@ -242,8 +243,7 @@ func (td *TestDirection) Start(cancel context.CancelFunc, mainRequestHandlerInde
 	once := sync.Once{}
 	td.closeFunc = func() {
 		once.Do(func() {
-			stopCapture <- true
-			close(stopCapture)
+			stopCapture()
 			td.manager.runningRW.Lock()
 			td.manager.running = false
 			td.manager.runningRW.Unlock()
@@ -378,14 +378,21 @@ func reducedUploadWorkerCount(active int32, rate, bestRate float64, backlog int6
 	return target
 }
 
-func (td *TestDirection) rateCapture() chan bool {
+const (
+	minCaptureTime = 4 * time.Second // the earliest a settled rate may end the test
+	settledWithin  = 0.01            // relative tolerance of a settled rate
+)
+
+func (td *TestDirection) rateCapture() func() {
 	ticker := time.NewTicker(td.manager.rateCaptureFrequency)
 	var prevTotalDataVolume int64 = 0
-	stopCapture := make(chan bool)
-	td.welford = internal.NewWelford(5*time.Second, td.manager.rateCaptureFrequency)
+	stopCapture := make(chan struct{})
+	captureStopped := make(chan struct{})
+	meter := &internal.Meter{}
 	sTime := time.Now()
 	go func(t *time.Ticker) {
 		defer t.Stop()
+		defer close(captureStopped)
 		for {
 			select {
 			case <-t.C:
@@ -395,29 +402,35 @@ func (td *TestDirection) rateCapture() chan bool {
 				if deltaDataVolume != 0 {
 					td.RateSequence = append(td.RateSequence, deltaDataVolume)
 				}
-				// anyway we update the measuring instrument
-				globalAvg := (float64(td.GetTotalDataVolume())) / float64(time.Since(sTime).Milliseconds()) * 1000
-				rateSample := float64(deltaDataVolume)
-				if td.TestType == typeUpload {
-					// Upload bytes are confirmed per completed request, so use the
-					// cumulative rate to avoid reporting a zero/spike sawtooth.
-					rateSample = globalAvg * td.manager.rateCaptureFrequency.Seconds()
-				}
-				if td.welford.Update(globalAvg, rateSample) {
+				elapsed := time.Since(sTime)
+				meter.Add(elapsed.Seconds(), td.GetTotalDataVolume())
+				rate := meter.Rate()
+				td.currentRate.Store(math.Float64bits(rate))
+				if elapsed >= minCaptureTime && meter.Settled(settledWithin) {
 					go td.closeFunc()
 				}
-				// reports the current rate at the given rate
 				if td.captureCallback != nil {
-					td.captureCallback(ByteRate(td.welford.EWMA()))
+					td.captureCallback(ByteRate(rate))
 				}
-			case stop := <-stopCapture:
-				if stop {
-					return
-				}
+			case <-stopCapture:
+				meter.Add(time.Since(sTime).Seconds(), td.GetTotalDataVolume())
+				td.finalRateValue = meter.Rate()
+				return
 			}
 		}
 	}(ticker)
-	return stopCapture
+	return func() {
+		close(stopCapture)
+		<-captureStopped
+	}
+}
+
+func (td *TestDirection) finalRate() float64 {
+	return td.finalRateValue
+}
+
+func (td *TestDirection) rate() float64 {
+	return math.Float64frombits(td.currentRate.Load())
 }
 
 func (dm *DataManager) NewChunk() Chunk {
@@ -511,11 +524,10 @@ func (dm *DataManager) GetAvgDownloadRate() float64 {
 	return float64(dm.download.GetTotalDataVolume()*8/1000) / unit
 }
 
+// GetEWMADownloadRate returns the current download rate in bytes per second, measured over the last
+// two thirds of the test so far. The name predates the measurement, which is no longer an EWMA.
 func (dm *DataManager) GetEWMADownloadRate() float64 {
-	if dm.download.welford != nil {
-		return dm.download.welford.EWMA()
-	}
-	return 0
+	return dm.download.rate()
 }
 
 func (dm *DataManager) GetAvgUploadRate() float64 {
@@ -523,11 +535,10 @@ func (dm *DataManager) GetAvgUploadRate() float64 {
 	return float64(dm.upload.GetTotalDataVolume()*8/1000) / unit
 }
 
+// GetEWMAUploadRate returns the current upload rate in bytes per second, measured over the last
+// two thirds of the test so far. The name predates the measurement, which is no longer an EWMA.
 func (dm *DataManager) GetEWMAUploadRate() float64 {
-	if dm.upload.welford != nil {
-		return dm.upload.welford.EWMA()
-	}
-	return 0
+	return dm.upload.rate()
 }
 
 type DataChunk struct {

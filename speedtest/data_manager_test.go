@@ -55,6 +55,36 @@ func TestDataManager_GetAvgDownloadRate(t *testing.T) {
 	}
 }
 
+func TestDataManager_FinalRateStopsBeforeCancellation(t *testing.T) {
+	const (
+		captureTime = 200 * time.Millisecond
+		perRequest  = int64(1_000) // one request a millisecond: about 1 MB/s
+		afterStop   = int64(1_000_000)
+	)
+	dm := NewDataManager()
+	dm.SetNThread(1)
+	dm.SetCaptureTime(captureTime)
+	dm.SetRateCaptureFrequency(5 * time.Millisecond)
+
+	var direction *TestDirection
+	direction = dm.RegisterDownloadHandler(func() {
+		direction.AddTotalDataVolume(perRequest)
+		time.Sleep(time.Millisecond)
+	})
+	direction.Start(func() {
+		direction.AddTotalDataVolume(afterStop)
+	}, 0)
+
+	got := direction.finalRate()
+	if got <= 0 {
+		t.Fatalf("final rate is %v, want a positive value", got)
+	}
+	// The cancellation bytes alone would add more than 7 MB/s to the last two thirds of the test.
+	if limit := 2 * float64(perRequest) / time.Millisecond.Seconds(); got > limit {
+		t.Fatalf("final rate is %v bytes/s, which includes bytes added after the stop boundary", got)
+	}
+}
+
 func TestDataManager_GetUploadConfirmationRatio(t *testing.T) {
 	dm := NewDataManager()
 	dm.upload.AddTotalReadVolume(2 * 1000 * 1000)
