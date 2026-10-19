@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -108,27 +109,18 @@ func TestDataManager_GetUploadConfirmationRatio(t *testing.T) {
 	}
 }
 
-func TestDataManager_UploadWorkerLimit(t *testing.T) {
+func TestDataManager_ConnectionLimit(t *testing.T) {
 	dm := NewDataManager()
 	dm.SetNThread(12)
-	if dm.uploadMaxWorkers != 12 {
-		t.Fatalf("explicit worker limit was capped at %d", dm.uploadMaxWorkers)
+	if dm.nThread != 12 || dm.nUploadThread != 12 {
+		t.Fatalf("explicit connection limits are %d and %d, want 12", dm.nThread, dm.nUploadThread)
 	}
 	dm.SetNThread(0)
-	if dm.uploadMaxWorkers != 8 {
-		t.Fatalf("default worker limit is %d, want 8", dm.uploadMaxWorkers)
+	if want := runtime.NumCPU(); dm.nThread != want {
+		t.Fatalf("default download connections are %d, want %d", dm.nThread, want)
 	}
-}
-
-func TestReducedUploadWorkerCount(t *testing.T) {
-	if got := reducedUploadWorkerCount(10, 0.5, 1, 0); got != 5 {
-		t.Fatalf("got %d workers after a 50%% rate drop, want 5", got)
-	}
-	if got := reducedUploadWorkerCount(10, 0.9, 1, 0); got != 9 {
-		t.Fatalf("got %d workers after a mild rate drop, want 9", got)
-	}
-	if got := reducedUploadWorkerCount(2, 0.5, 1, 0); got != 1 {
-		t.Fatalf("got %d workers at the minimum, want 1", got)
+	if dm.nUploadThread != 8 {
+		t.Fatalf("default upload connections are %d, want 8", dm.nUploadThread)
 	}
 }
 

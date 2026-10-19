@@ -134,7 +134,7 @@ Flags:
                                eg: --source=10.20.0.101
                                eg: --source=eth0  (Linux only)
   -m  --multi                  Enable multi-server mode.
-  -t  --thread=THREAD          Set the maximum concurrent connections (upload adapts automatically; default cap 8).
+  -t  --thread=THREAD          Set the number of concurrent connections (default: one per CPU for download, 8 for upload).
       --search=SEARCH          Fuzzy search servers by a keyword.
       --ua                     Set the user-agent header for the speedtest.
       --no-download            Disable download test.

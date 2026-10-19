@@ -88,8 +88,8 @@ type DataManager struct {
 
 	captureTime          time.Duration
 	rateCaptureFrequency time.Duration
-	nThread              int
-	uploadMaxWorkers     int
+	nThread              int // download connections
+	nUploadThread        int // upload connections
 
 	running   bool
 	runningRW sync.RWMutex
@@ -103,8 +103,6 @@ type TestDirection struct {
 	manager         *DataManager                // manager
 	totalDataVolume int64                       // total send/receive data volume
 	totalReadVolume int64                       // upload bytes read into the transport
-	activeWorkers   int32                       // current upload worker limit
-	maxWorkers      int32                       // configured upload worker limit
 	acked           ackedBytes                  // upload bytes acknowledged by the server's TCP stack
 	RateSequence    []int64                     // rate history sequence
 	currentRate     atomic.Uint64               // float64 bits of the latest rate estimate, bytes per second
@@ -125,12 +123,12 @@ func (dm *DataManager) NewDataDirection(testType int) *TestDirection {
 func NewDataManager() *DataManager {
 	r := bytes.Repeat([]byte{0xAA}, readChunkSize) // uniformly distributed sequence of bits
 	ret := &DataManager{
-		nThread:              runtime.NumCPU(),
+		nThread:              defaultDownloadConnections(),
+		nUploadThread:        defaultUploadConnections,
 		captureTime:          time.Second * 15,
 		rateCaptureFrequency: time.Millisecond * 50,
 		Snapshot:             &Snapshot{},
 		repeatByte:           &r,
-		uploadMaxWorkers:     8,
 	}
 	ret.download = ret.NewDataDirection(typeDownload)
 	ret.upload = ret.NewDataDirection(typeUpload)
@@ -168,7 +166,7 @@ func (dm *DataManager) Wait() {
 }
 
 func (dm *DataManager) RegisterUploadHandler(fn func()) *TestDirection {
-	if len(dm.upload.fns) < dm.nThread {
+	if len(dm.upload.fns) < dm.nUploadThread {
 		dm.upload.Add(fn)
 	}
 	return dm.upload
@@ -206,8 +204,8 @@ func (td *TestDirection) Start(cancel context.CancelFunc, mainRequestHandlerInde
 	}
 	mainLoadFactor := 0.1
 	workerLimit := td.manager.nThread
-	if td.TestType == typeUpload && td.manager.uploadMaxWorkers < workerLimit {
-		workerLimit = td.manager.uploadMaxWorkers
+	if td.TestType == typeUpload {
+		workerLimit = td.manager.nUploadThread
 	}
 	// When the number of processor cores is equivalent to the processing program,
 	// the processing efficiency reaches the highest level (VT is not considered).
@@ -225,21 +223,6 @@ func (td *TestDirection) Start(cancel context.CancelFunc, mainRequestHandlerInde
 	wg := sync.WaitGroup{}
 	td.manager.running = true
 	stopCapture := td.rateCapture()
-	td.maxWorkers = int32(workerLimit)
-	initialWorkers := td.maxWorkers
-	if td.TestType == typeUpload {
-		if td.manager.uploadMaxWorkers <= 8 {
-			initialWorkers = int32(runtime.NumCPU())
-			if initialWorkers > td.maxWorkers {
-				initialWorkers = td.maxWorkers
-			}
-		}
-	}
-	atomic.StoreInt32(&td.activeWorkers, initialWorkers)
-	if td.TestType == typeUpload {
-		dbg.Printf("Upload workers: %d/%d\n", initialWorkers, td.maxWorkers)
-	}
-
 	// refresh once function
 	once := sync.Once{}
 	td.closeFunc = func() {
@@ -253,14 +236,10 @@ func (td *TestDirection) Start(cancel context.CancelFunc, mainRequestHandlerInde
 		})
 	}
 
-	if td.TestType == typeUpload && td.maxWorkers > 1 {
-		go td.adaptUploadWorkers()
-	}
 	time.AfterFunc(td.manager.captureTime, td.closeFunc)
 	for i := 0; i < mainN; i++ {
 		wg.Add(1)
-		workerID := i
-		go td.runWorker(&wg, workerID, td.fns[mainRequestHandlerIndex])
+		go td.runWorker(&wg, td.fns[mainRequestHandlerIndex])
 	}
 	for j := 0; j < auxN; {
 		for i := range td.fns {
@@ -272,15 +251,14 @@ func (td *TestDirection) Start(cancel context.CancelFunc, mainRequestHandlerInde
 			}
 			wg.Add(1)
 			t := i
-			workerID := mainN + j
-			go td.runWorker(&wg, workerID, td.fns[t])
+			go td.runWorker(&wg, td.fns[t])
 			j++
 		}
 	}
 	wg.Wait()
 }
 
-func (td *TestDirection) runWorker(wg *sync.WaitGroup, workerID int, fn func()) {
+func (td *TestDirection) runWorker(wg *sync.WaitGroup, fn func()) {
 	defer wg.Done()
 	for {
 		td.manager.runningRW.RLock()
@@ -289,94 +267,8 @@ func (td *TestDirection) runWorker(wg *sync.WaitGroup, workerID int, fn func()) 
 		if !running {
 			return
 		}
-		if !td.workerEnabled(workerID) {
-			time.Sleep(time.Millisecond)
-			continue
-		}
 		fn()
 	}
-}
-
-func (td *TestDirection) workerEnabled(workerID int) bool {
-	if td.TestType != typeUpload {
-		return true
-	}
-	return int32(workerID) < atomic.LoadInt32(&td.activeWorkers)
-}
-
-func (td *TestDirection) adaptUploadWorkers() {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	previousConfirmed := td.GetTotalDataVolume()
-	previousAt := time.Now()
-	bestRate := 0.0
-	for range ticker.C {
-		td.manager.runningRW.RLock()
-		running := td.manager.running
-		td.manager.runningRW.RUnlock()
-		if !running {
-			return
-		}
-
-		now := time.Now()
-		confirmed := td.GetTotalDataVolume()
-		delta := confirmed - previousConfirmed
-		elapsed := now.Sub(previousAt).Seconds()
-		previousConfirmed = confirmed
-		previousAt = now
-		if delta <= 0 || elapsed <= 0 {
-			continue
-		}
-
-		rate := float64(delta) / elapsed
-		active := atomic.LoadInt32(&td.activeWorkers)
-		read := td.GetTotalReadVolume()
-		backlog := read - confirmed
-		confirmation := td.manager.GetUploadConfirmationRatio()
-		if bestRate == 0 || rate > bestRate*1.05 {
-			bestRate = rate
-			if active < td.maxWorkers {
-				active++
-				atomic.StoreInt32(&td.activeWorkers, active)
-				dbg.Printf("Upload workers: %d/%d (confirmed: %.2f MB/s, confirmation: %.1f%%, backlog: %.2f MB)\n", active, td.maxWorkers, rate/1000/1000, confirmation*100, float64(backlog)/1000/1000)
-			}
-			continue
-		}
-
-		if active > 1 && (rate < bestRate*0.85 || backlog > int64(active)*2*1024*1024) {
-			active = reducedUploadWorkerCount(active, rate, bestRate, backlog)
-			atomic.StoreInt32(&td.activeWorkers, active)
-			dbg.Printf("Upload workers: %d/%d (confirmed: %.2f MB/s, confirmation: %.1f%%, backlog: %.2f MB)\n", active, td.maxWorkers, rate/1000/1000, confirmation*100, float64(backlog)/1000/1000)
-			bestRate = rate
-		}
-	}
-}
-
-func reducedUploadWorkerCount(active int32, rate, bestRate float64, backlog int64) int32 {
-	if active <= 1 {
-		return 1
-	}
-
-	factor := 1.0
-	if bestRate > 0 && rate < bestRate*0.85 {
-		factor = math.Min(factor, rate/bestRate)
-	}
-	backlogLimit := int64(active) * 2 * 1024 * 1024
-	if backlog > backlogLimit {
-		factor = math.Min(factor, float64(backlogLimit)/float64(backlog))
-	}
-	if factor >= 1 {
-		return active - 1
-	}
-
-	target := int32(math.Ceil(float64(active) * factor))
-	if target >= active {
-		target = active - 1
-	}
-	if target < 1 {
-		return 1
-	}
-	return target
 }
 
 const (
@@ -514,13 +406,20 @@ func (dm *DataManager) SetCaptureTime(duration time.Duration) Manager {
 
 func (dm *DataManager) SetNThread(n int) Manager {
 	if n < 1 {
-		dm.nThread = runtime.NumCPU()
-		dm.uploadMaxWorkers = 8
+		dm.nThread, dm.nUploadThread = defaultDownloadConnections(), defaultUploadConnections
 	} else {
-		dm.nThread = n
-		dm.uploadMaxWorkers = n
+		dm.nThread, dm.nUploadThread = n, n
 	}
 	return dm
+}
+
+// The default connection counts keep the load public servers already see: download uses one
+// connection per CPU and upload uses 8. Far servers cap each connection's rate, so long links
+// fill only with more connections, which SetNThread allows.
+const defaultUploadConnections = 8
+
+func defaultDownloadConnections() int {
+	return runtime.NumCPU()
 }
 
 func (dm *DataManager) Snapshots() *Snapshots {

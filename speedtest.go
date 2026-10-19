@@ -35,7 +35,7 @@ var (
 	source        = kingpin.Flag("source", "Bind a source interface for the speedtest.").String()
 	dnsBindSource = kingpin.Flag("dns-bind-source", "DNS request binding source (experimental).").Bool()
 	multi         = kingpin.Flag("multi", "Enable multi-server mode.").Short('m').Bool()
-	thread        = kingpin.Flag("thread", "Set the maximum number of concurrent connections (upload adapts automatically; default cap 8).").Short('t').Int()
+	thread        = kingpin.Flag("thread", "Set the number of concurrent connections (default: one per CPU for download, 8 for upload).").Short('t').Int()
 	search        = kingpin.Flag("search", "Fuzzy search servers by a keyword.").String()
 	userAgent     = kingpin.Flag("ua", "Set the user-agent header for the speedtest.").String()
 	noDownload    = kingpin.Flag("no-download", "Disable download test.").Bool()

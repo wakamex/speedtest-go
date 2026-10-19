@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -73,7 +72,7 @@ func TestDownloadRejectsHTTPErrorWithoutCountingBody(t *testing.T) {
 }
 
 func TestDownloadTestContext(t *testing.T) {
-	idealSpeed := 0.1 * 8 * float64(runtime.NumCPU()) * 10 / 0.1 // one mockRequest per second with all CPU cores
+	idealSpeed := 0.1 * 8 * float64(defaultDownloadConnections()) * 10 / 0.1 // one mockRequest per second on each default connection
 	delta := 0.15
 	latency, _ := time.ParseDuration("5ms")
 	client := New()
