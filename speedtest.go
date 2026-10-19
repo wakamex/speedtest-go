@@ -218,7 +218,7 @@ func main() {
 			}
 			accEcho.Stop()
 			mean, _, std, minL, maxL := speedtest.StandardDeviation(accEcho.Latencies())
-			task.Printf("Upload: %s (Used: %.2fMB Confirmed: %.1f%%) (Latency: %dms Jitter: %dms Min: %dms Max: %dms)", server.ULSpeed, float64(server.Context.GetTotalUpload())/1000/1000, server.Context.GetUploadConfirmationRatio()*100, mean/1000000, std/1000000, minL/1000000, maxL/1000000)
+			task.Printf("Upload: %s (Used: %.2fMB) (Latency: %dms Jitter: %dms Min: %dms Max: %dms)", server.ULSpeed, float64(server.Context.GetTotalUpload())/1000/1000, mean/1000000, std/1000000, minL/1000000, maxL/1000000)
 			task.Complete()
 		})
 

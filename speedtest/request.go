@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"path"
 	"strings"
@@ -237,6 +238,12 @@ func uploadRequest(ctx context.Context, s *Server, w int) error {
 	if err != nil {
 		return err
 	}
+	acked := uploadAcked(s.Context)
+	req = req.WithContext(httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		if dialedTo(info.Conn, req.URL) {
+			acked.use(info.Conn)
+		}
+	}}))
 	req.ContentLength = chunkSize
 	dbg.Printf("Len=%d, XulURL: %s\n", req.ContentLength, s.URL)
 	req.Header.Set("Content-Type", "application/octet-stream")
@@ -316,6 +323,9 @@ func tcpUploadRequest(ctx context.Context, s *Server, w int) error {
 		return err
 	}
 	dc := s.Context.NewChunk().UploadHandler(payloadSize)
+	acked := uploadAcked(s.Context)
+	acked.use(client.NetConn())
+	defer acked.release(client.NetConn())
 	acknowledged, err := client.Upload(ctx, size, dc)
 	if err != nil {
 		return err

@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// confirmedUpload returns the upload bytes confirmed by successful upload responses, which
+// GetTotalUpload reports only where the platform does not report acknowledged bytes.
+func confirmedUpload(s *Speedtest) int64 {
+	return s.Manager.(*DataManager).upload.GetTotalDataVolume()
+}
+
 func BenchmarkDataManager_NewDataChunk(b *testing.B) {
 	dmp := NewDataManager()
 	dmp.Reset()
@@ -143,7 +149,7 @@ func TestUploadRequestCountsOnlyConfirmedUploads(t *testing.T) {
 	}
 
 	want := int64(ulSizes[0]*100-51) * 10
-	if got := client.GetTotalUpload(); got != want {
+	if got := confirmedUpload(client); got != want {
 		t.Fatalf("counted %d bytes, want %d", got, want)
 	}
 }
@@ -187,7 +193,7 @@ func TestResolveUploadURLFollowsTemporaryRedirect(t *testing.T) {
 	if received != want {
 		t.Fatalf("resolved endpoint received %d bytes, want %d", received, want)
 	}
-	if got := client.GetTotalUpload(); got != want {
+	if got := confirmedUpload(client); got != want {
 		t.Fatalf("counted %d upload bytes, want %d", got, want)
 	}
 }
@@ -204,7 +210,7 @@ func TestUploadRequestDoesNotCountRejectedUploads(t *testing.T) {
 	if err := uploadRequest(context.Background(), target, 0); err == nil {
 		t.Fatal("expected upload request to fail")
 	}
-	if got := client.GetTotalUpload(); got != 0 {
+	if got := confirmedUpload(client); got != 0 {
 		t.Fatalf("counted %d bytes for a rejected upload", got)
 	}
 }

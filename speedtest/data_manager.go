@@ -105,6 +105,7 @@ type TestDirection struct {
 	totalReadVolume int64                       // upload bytes read into the transport
 	activeWorkers   int32                       // current upload worker limit
 	maxWorkers      int32                       // configured upload worker limit
+	acked           ackedBytes                  // upload bytes acknowledged by the server's TCP stack
 	RateSequence    []int64                     // rate history sequence
 	currentRate     atomic.Uint64               // float64 bits of the latest rate estimate, bytes per second
 	finalRateValue  float64                     // measured bytes per second at test termination
@@ -383,6 +384,18 @@ const (
 	settledWithin  = 0.01            // relative tolerance of a settled rate
 )
 
+// measuredBytes is the meter's input: bytes received for download, and for upload the bytes
+// the server's TCP stack has acknowledged, or confirmed request bytes where the platform does
+// not report acknowledgements.
+func (td *TestDirection) measuredBytes() int64 {
+	if td.TestType == typeUpload {
+		if acked, ok := td.acked.total(); ok {
+			return acked
+		}
+	}
+	return td.GetTotalDataVolume()
+}
+
 func (td *TestDirection) rateCapture() func() {
 	ticker := time.NewTicker(td.manager.rateCaptureFrequency)
 	var prevTotalDataVolume int64 = 0
@@ -403,7 +416,7 @@ func (td *TestDirection) rateCapture() func() {
 					td.RateSequence = append(td.RateSequence, deltaDataVolume)
 				}
 				elapsed := time.Since(sTime)
-				meter.Add(elapsed.Seconds(), td.GetTotalDataVolume())
+				meter.Add(elapsed.Seconds(), td.measuredBytes())
 				rate := meter.Rate()
 				td.currentRate.Store(math.Float64bits(rate))
 				if elapsed >= minCaptureTime && meter.Settled(settledWithin) {
@@ -413,7 +426,7 @@ func (td *TestDirection) rateCapture() func() {
 					td.captureCallback(ByteRate(rate))
 				}
 			case <-stopCapture:
-				meter.Add(time.Since(sTime).Seconds(), td.GetTotalDataVolume())
+				meter.Add(time.Since(sTime).Seconds(), td.measuredBytes())
 				td.finalRateValue = meter.Rate()
 				return
 			}
@@ -454,12 +467,15 @@ func (dm *DataManager) GetTotalDownload() int64 {
 	return dm.download.GetTotalDataVolume()
 }
 
+// GetTotalUpload returns the upload bytes the server has received: the bytes its TCP stack
+// has acknowledged where the platform reports them, and otherwise the bytes confirmed by
+// successful upload responses.
 func (dm *DataManager) GetTotalUpload() int64 {
-	return dm.upload.GetTotalDataVolume()
+	return dm.upload.measuredBytes()
 }
 
-// GetUploadBacklog returns upload bytes read by the transport but not yet
-// confirmed by a successful upload response.
+// GetUploadBacklog returns upload bytes read by the transport that the server has not yet
+// received.
 func (dm *DataManager) GetUploadBacklog() int64 {
 	backlog := dm.upload.GetTotalReadVolume() - dm.GetTotalUpload()
 	if backlog < 0 {
@@ -468,9 +484,8 @@ func (dm *DataManager) GetUploadBacklog() int64 {
 	return backlog
 }
 
-// GetUploadConfirmationRatio returns server-confirmed upload bytes divided by
-// bytes read from upload request bodies. It is an application-level estimate,
-// not a TCP ACK counter.
+// GetUploadConfirmationRatio returns the upload bytes the server has received divided by
+// the bytes read from upload request bodies.
 func (dm *DataManager) GetUploadConfirmationRatio() float64 {
 	read := dm.upload.GetTotalReadVolume()
 	if read <= 0 {
