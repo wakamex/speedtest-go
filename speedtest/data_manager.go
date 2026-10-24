@@ -88,8 +88,9 @@ type DataManager struct {
 
 	captureTime          time.Duration
 	rateCaptureFrequency time.Duration
-	nThread              int // download connections
-	nUploadThread        int // upload connections
+	nThread              int  // download connections
+	nUploadThread        int  // upload connections
+	disableEarlyStop     bool // research: run to captureTime and only record when the rate settled
 
 	running   bool
 	runningRW sync.RWMutex
@@ -107,6 +108,7 @@ type TestDirection struct {
 	RateSequence    []int64                     // rate history sequence
 	currentRate     atomic.Uint64               // float64 bits of the latest rate estimate, bytes per second
 	finalRateValue  float64                     // measured bytes per second at test termination
+	settledAt       time.Duration               // research: elapsed time when the rate first settled
 	captureCallback func(realTimeRate ByteRate) // user callback
 	closeFunc       func()                      // close func
 	*funcGroup                                  // actually exec function
@@ -312,7 +314,12 @@ func (td *TestDirection) rateCapture() func() {
 				rate := meter.Rate()
 				td.currentRate.Store(math.Float64bits(rate))
 				if elapsed >= minCaptureTime && meter.Settled(settledWithin) {
-					go td.closeFunc()
+					if td.settledAt == 0 {
+						td.settledAt = elapsed
+					}
+					if !td.manager.disableEarlyStop {
+						go td.closeFunc()
+					}
 				}
 				if td.captureCallback != nil {
 					td.captureCallback(ByteRate(rate))
